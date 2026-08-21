@@ -1,0 +1,12 @@
+# Core Deep Learning Framework (CUDA 12.6 enabled)
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.13.0+cu126
+torchvision==0.28.0+cu126
+
+# YOLOv8 & Computer Vision
+ultralytics==8.4.126
+opencv-python==5.0.0.93
+numpy==2.5.2
+
+# Testing & Validation
+pytest==9.1.1
