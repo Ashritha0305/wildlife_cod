@@ -1,13 +1,75 @@
 """
 Utility functions for YOLOv8 Wildlife Detection Subsystem
-Includes coordinate transformations, bounding box validation,
-downstream interface structuring, and annotation conversion tools.
+Includes coordinate transformations, bounding box validation & clipping,
+downstream Deep SORT interface structuring, and contract verification.
 """
 
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 import os
 import cv2
 import numpy as np
+
+
+SUPPORTED_SPECIES: Dict[int, str] = {
+    0: "buffalo",
+    1: "elephant",
+    2: "rhino",
+    3: "zebra"
+}
+
+
+def validate_image_frame(frame: Any) -> Tuple[int, int]:
+    """
+    Validate that an input frame is a non-empty, valid numpy array image.
+    
+    Args:
+        frame: Input object to validate.
+        
+    Returns:
+        (height, width) of the validated image.
+        
+    Raises:
+        ValueError: If frame is None, empty, or below minimum dimensions.
+        TypeError: If frame is not a numpy.ndarray.
+    """
+    if frame is None:
+        raise ValueError("Input frame cannot be None.")
+    if not isinstance(frame, np.ndarray):
+        raise TypeError(f"Input frame must be a numpy.ndarray, got {type(frame).__name__}")
+    if frame.size == 0 or len(frame.shape) < 2:
+        raise ValueError(f"Invalid frame dimensions or empty frame: {frame.shape}")
+        
+    h, w = frame.shape[:2]
+    if h < 10 or w < 10:
+        raise ValueError(f"Frame resolution too small: {w}x{h} (minimum 10x10 required)")
+        
+    return (h, w)
+
+
+def clip_bbox(
+    bbox: Tuple[float, float, float, float],
+    frame_shape: Tuple[int, int]
+) -> Tuple[int, int, int, int]:
+    """
+    Clamp and integerize bounding box coordinates strictly within image boundaries.
+    
+    Args:
+        bbox: (x1, y1, x2, y2) in pixel space.
+        frame_shape: (height, width) of the image frame.
+        
+    Returns:
+        (x1, y1, x2, y2) integers satisfying:
+        0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height.
+    """
+    h_frame, w_frame = frame_shape[:2]
+    x1, y1, x2, y2 = bbox
+    
+    x1_clamped = int(round(max(0.0, min(float(x1), float(w_frame - 1)))))
+    y1_clamped = int(round(max(0.0, min(float(y1), float(h_frame - 1)))))
+    x2_clamped = int(round(max(float(x1_clamped + 1), min(float(x2), float(w_frame)))))
+    y2_clamped = int(round(max(float(y1_clamped + 1), min(float(y2), float(h_frame)))))
+    
+    return (x1_clamped, y1_clamped, x2_clamped, y2_clamped)
 
 
 def xyxy_to_yolo(
@@ -17,14 +79,6 @@ def xyxy_to_yolo(
 ) -> Tuple[float, float, float, float]:
     """
     Convert absolute pixel coordinates [x1, y1, x2, y2] to normalized YOLO [x_center, y_center, width, height].
-    
-    Args:
-        box: (x1, y1, x2, y2) in pixel space.
-        img_width: Width of image in pixels.
-        img_height: Height of image in pixels.
-        
-    Returns:
-        (x_center, y_center, width, height) normalized to [0.0, 1.0].
     """
     x1, y1, x2, y2 = box
     x1 = max(0.0, min(float(x1), float(img_width)))
@@ -38,10 +92,10 @@ def xyxy_to_yolo(
     y_center = y1 + (box_h / 2.0)
     
     return (
-        x_center / img_width,
-        y_center / img_height,
-        box_w / img_width,
-        box_h / img_height
+        x_center / max(float(img_width), 1.0),
+        y_center / max(float(img_height), 1.0),
+        box_w / max(float(img_width), 1.0),
+        box_h / max(float(img_height), 1.0)
     )
 
 
@@ -52,14 +106,6 @@ def yolo_to_xyxy(
 ) -> Tuple[int, int, int, int]:
     """
     Convert normalized YOLO [x_center, y_center, width, height] to absolute pixel [x1, y1, x2, y2].
-    
-    Args:
-        yolo_box: (x_center, y_center, width, height) in [0.0, 1.0].
-        img_width: Width of image in pixels.
-        img_height: Height of image in pixels.
-        
-    Returns:
-        (x1, y1, x2, y2) integers in pixel space clamped to frame bounds.
     """
     x_c, y_c, w, h = yolo_box
     x1 = int(round((x_c - (w / 2.0)) * img_width))
@@ -67,12 +113,7 @@ def yolo_to_xyxy(
     x2 = int(round((x_c + (w / 2.0)) * img_width))
     y2 = int(round((y_c + (h / 2.0)) * img_height))
     
-    x1 = max(0, min(x1, img_width - 1))
-    y1 = max(0, min(y1, img_height - 1))
-    x2 = max(0, min(x2, img_width))
-    y2 = max(0, min(y2, img_height))
-    
-    return (x1, y1, x2, y2)
+    return clip_bbox((x1, y1, x2, y2), (img_height, img_width))
 
 
 def coco_to_yolo(
@@ -80,39 +121,11 @@ def coco_to_yolo(
     img_width: int,
     img_height: int
 ) -> Tuple[float, float, float, float]:
-    """
-    Convert COCO bounding box [xmin, ymin, width, height] in pixels to normalized YOLO format.
-    """
+    """Convert COCO bounding box [xmin, ymin, width, height] in pixels to normalized YOLO format."""
     xmin, ymin, w, h = coco_box
     xmax = xmin + w
     ymax = ymin + h
     return xyxy_to_yolo((xmin, ymin, xmax, ymax), img_width, img_height)
-
-
-def mask_to_yolo_bbox(
-    binary_mask: np.ndarray
-) -> Optional[Tuple[float, float, float, float]]:
-    """
-    Derive normalized YOLO bounding box [x_center, y_center, width, height] from binary segmentation mask.
-    
-    Args:
-        binary_mask: 2D numpy array (uint8 or bool) where foreground > 0.
-        
-    Returns:
-        (x_center, y_center, width, height) normalized, or None if mask is empty.
-    """
-    if binary_mask is None or not np.any(binary_mask > 0):
-        return None
-        
-    h_img, w_img = binary_mask.shape[:2]
-    rows = np.any(binary_mask > 0, axis=1)
-    cols = np.any(binary_mask > 0, axis=0)
-    
-    ymin, ymax = np.where(rows)[0][[0, -1]]
-    xmin, xmax = np.where(cols)[0][[0, -1]]
-    
-    # xmax, ymax inclusive boundary adjustment
-    return xyxy_to_yolo((float(xmin), float(ymin), float(xmax + 1), float(ymax + 1)), w_img, h_img)
 
 
 def format_detection_for_deepsort(
@@ -122,9 +135,9 @@ def format_detection_for_deepsort(
     bbox: Tuple[int, int, int, int]
 ) -> Dict[str, Any]:
     """
-    Construct standardized dictionary for downstream Deep SORT integration.
+    Construct standardized dictionary conforming strictly to the downstream Deep SORT interface contract.
     
-    Contract:
+    Contract Schema:
     {
         "class_id": int,
         "class_name": str,
@@ -169,6 +182,9 @@ def validate_detection_structure(detection: Dict[str, Any], frame_shape: Tuple[i
     x1, y1, x2, y2 = bbox
     h_frame, w_frame = frame_shape[:2]
     
+    if not all(isinstance(c, (int, np.integer)) for c in [x1, y1, x2, y2]):
+        return False
+        
     if x1 >= x2 or y1 >= y2:
         return False
         
@@ -176,3 +192,28 @@ def validate_detection_structure(detection: Dict[str, Any], frame_shape: Tuple[i
         return False
         
     return True
+
+
+def convert_to_deepsort_input_format(
+    detections: List[Dict[str, Any]],
+    bbox_format: str = "xyxy"
+) -> List[Tuple[List[int], float, str]]:
+    """
+    Adapter demonstrating downstream consumption by Deep SORT tracker.
+    
+    Args:
+        detections: List of structured detection dicts from WildlifeDetector.
+        bbox_format: 'xyxy' for [x1, y1, x2, y2] or 'tlwh' for [top_left_x, top_left_y, width, height].
+        
+    Returns:
+        List of tuples: (bbox, confidence, class_name) ready for Deep SORT Tracker update.
+    """
+    deepsort_inputs = []
+    for d in detections:
+        x1, y1, x2, y2 = d["bbox"]
+        if bbox_format == "tlwh":
+            box = [x1, y1, x2 - x1, y2 - y1]
+        else:
+            box = [x1, y1, x2, y2]
+        deepsort_inputs.append((box, d["confidence"], d["class_name"]))
+    return deepsort_inputs

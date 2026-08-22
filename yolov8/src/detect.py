@@ -1,41 +1,80 @@
 """
-Unified Wildlife Object Detection API
+Production Wildlife Object Detection API
 Module: YOLOv8 Wildlife Object Detection Subsystem
 Downstream Target: Deep SORT Multi-Object Tracking & ZoeDepth Depth Estimation
+
+Selected Baseline Architecture: YOLOv8s (Small)
+Supported Classes:
+  0: buffalo
+  1: elephant
+  2: rhino
+  3: zebra
 """
 
 from typing import List, Dict, Any, Tuple, Optional, Union
 import os
-import time
 import cv2
 import numpy as np
 import torch
 from ultralytics import YOLO
-from yolov8.src.utils import format_detection_for_deepsort, validate_detection_structure
+
+from yolov8.src.utils import (
+    validate_image_frame,
+    clip_bbox,
+    format_detection_for_deepsort,
+    validate_detection_structure,
+    SUPPORTED_SPECIES
+)
+
+# Standard default checkpoint location for production YOLOv8s baseline model
+DEFAULT_YOLOV8S_CHECKPOINT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "results",
+    "baseline_yolov8s",
+    "weights",
+    "best.pt"
+)
 
 
 class WildlifeDetector:
     """
     Production-grade YOLOv8 Wildlife Detection Engine.
-    Exposes unified detect() API returning structured detection dictionaries
-    strictly conforming to the downstream Deep SORT interface contract.
+    Exposes unified detect(), detect_image(), detect_video_frame(), and predict() APIs
+    returning deterministic structured detection dictionaries strictly conforming
+    to the downstream Deep SORT interface contract.
     """
 
     def __init__(
         self,
-        model_path: str,
-        conf_threshold: float = 0.35,
-        iou_threshold: float = 0.45,
+        model_path: Optional[str] = None,
+        conf_threshold: float = 0.25,
+        iou_threshold: float = 0.60,
         device: Optional[Union[str, int]] = None,
         imgsz: int = 640
     ):
         """
         Initialize the detector and load weights once onto the target device.
+        
+        Args:
+            model_path: Path to YOLOv8 weights (.pt). Defaults to baseline_yolov8s/weights/best.pt.
+            conf_threshold: Default confidence threshold for object filtering (default 0.25).
+            iou_threshold: Default IoU threshold for Non-Maximum Suppression (default 0.60).
+            device: Target device ('cuda:0', 0, 'cpu', etc.). Auto-resolves if None.
+            imgsz: Input resolution square size (default 640).
         """
+        # Resolve model path
+        if model_path is None:
+            if os.path.exists(DEFAULT_YOLOV8S_CHECKPOINT):
+                model_path = DEFAULT_YOLOV8S_CHECKPOINT
+            elif os.path.exists("yolov8s.pt"):
+                model_path = "yolov8s.pt"
+            else:
+                model_path = "yolov8n.pt"
+
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model checkpoint not found at: {model_path}")
 
-        self.model_path = model_path
+        self.model_path = os.path.abspath(model_path)
         self.conf_threshold = float(conf_threshold)
         self.iou_threshold = float(iou_threshold)
         self.imgsz = int(imgsz)
@@ -47,10 +86,15 @@ class WildlifeDetector:
             self.device = str(device)
 
         # Load model once
-        self.model = YOLO(model_path)
-        self.class_names = self.model.names if hasattr(self.model, "names") else {}
+        self.model = YOLO(self.model_path)
+        
+        # Load class mappings
+        if hasattr(self.model, "names") and isinstance(self.model.names, dict) and len(self.model.names) > 0:
+            self.class_names = self.model.names
+        else:
+            self.class_names = SUPPORTED_SPECIES
 
-        # Warm up GPU
+        # Warm up GPU to eliminate cold-start CUDA initialization latency
         self._warmup()
 
     def _warmup(self, num_runs: int = 3):
@@ -75,7 +119,7 @@ class WildlifeDetector:
         iou: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
-        Execute wildlife object detection on a single frame.
+        Execute wildlife object detection on a single frame numpy array.
 
         Args:
             frame: Input image as 2D/3D numpy array (BGR format).
@@ -89,23 +133,15 @@ class WildlifeDetector:
                     "class_id": int,
                     "class_name": str,
                     "confidence": float,
-                    "bbox": [x1, y1, x2, y2]  # pixel coordinates
+                    "bbox": [x1, y1, x2, y2]  # absolute pixel coordinates clamped to frame
                 }
             ]
         """
-        if frame is None:
-            raise ValueError("Input frame cannot be None.")
-        if not isinstance(frame, np.ndarray):
-            raise TypeError(f"Input frame must be a numpy.ndarray, got {type(frame).__name__}")
-        if frame.size == 0 or len(frame.shape) < 2:
-            raise ValueError(f"Invalid frame dimensions: {frame.shape}")
+        # Validate input frame
+        h_frame, w_frame = validate_image_frame(frame)
 
-        h_frame, w_frame = frame.shape[:2]
-        if h_frame < 10 or w_frame < 10:
-            raise ValueError(f"Frame resolution too small: {w_frame}x{h_frame}")
-
-        conf_thresh = conf if conf is not None else self.conf_threshold
-        iou_thresh = iou if iou is not None else self.iou_threshold
+        conf_thresh = float(conf) if conf is not None else self.conf_threshold
+        iou_thresh = float(iou) if iou is not None else self.iou_threshold
 
         # Execute prediction
         results = self.model.predict(
@@ -134,13 +170,13 @@ class WildlifeDetector:
 
         for i in range(len(xyxy)):
             box = xyxy[i]
-            x1 = int(round(max(0, min(float(box[0]), w_frame - 1))))
-            y1 = int(round(max(0, min(float(box[1]), h_frame - 1))))
-            x2 = int(round(max(x1 + 1, min(float(box[2]), w_frame))))
-            y2 = int(round(max(y1 + 1, min(float(box[3]), h_frame))))
+            x1, y1, x2, y2 = clip_bbox(
+                (float(box[0]), float(box[1]), float(box[2]), float(box[3])),
+                (h_frame, w_frame)
+            )
 
             cls_id = int(clss[i])
-            cls_name = self.class_names.get(cls_id, f"wildlife_{cls_id}")
+            cls_name = self.class_names.get(cls_id, SUPPORTED_SPECIES.get(cls_id, f"wildlife_{cls_id}"))
             score = float(confs[i])
 
             det_dict = format_detection_for_deepsort(
@@ -155,13 +191,60 @@ class WildlifeDetector:
 
         return detections
 
+    def detect_image(
+        self,
+        image_input: Union[str, np.ndarray],
+        conf: Optional[float] = None,
+        iou: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Convenience wrapper for single image input (file path or numpy array).
+        """
+        if isinstance(image_input, str):
+            if not os.path.exists(image_input):
+                raise FileNotFoundError(f"Image path not found: {image_input}")
+            frame = cv2.imread(image_input)
+            if frame is None:
+                raise ValueError(f"Could not decode image at: {image_input}")
+        elif isinstance(image_input, np.ndarray):
+            frame = image_input
+        else:
+            raise TypeError(f"image_input must be a filepath string or numpy.ndarray, got {type(image_input).__name__}")
+
+        return self.detect(frame, conf=conf, iou=iou)
+
+    def detect_video_frame(
+        self,
+        frame: np.ndarray,
+        conf: Optional[float] = None,
+        iou: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Convenience wrapper for real-time video frame inference.
+        """
+        return self.detect(frame, conf=conf, iou=iou)
+
+    def predict(
+        self,
+        source: Union[str, np.ndarray],
+        conf: Optional[float] = None,
+        iou: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Unified alias matching standard predictor interface.
+        """
+        return self.detect_image(source, conf=conf, iou=iou)
+
     def draw_detections(
         self,
         frame: np.ndarray,
         detections: List[Dict[str, Any]],
         color: Tuple[int, int, int] = (0, 255, 0)
     ) -> np.ndarray:
-        """Helper to render bounding boxes and class names onto a frame for visualization."""
+        """Helper to render bounding boxes and class labels onto a frame for visualization."""
+        if frame is None or not isinstance(frame, np.ndarray):
+            raise ValueError("Invalid frame provided to draw_detections")
+
         annotated = frame.copy()
         for det in detections:
             x1, y1, x2, y2 = det["bbox"]
@@ -180,3 +263,14 @@ class WildlifeDetector:
                 cv2.LINE_AA
             )
         return annotated
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Return model metadata and runtime configuration."""
+        return {
+            "model_path": self.model_path,
+            "device": self.device,
+            "imgsz": self.imgsz,
+            "conf_threshold": self.conf_threshold,
+            "iou_threshold": self.iou_threshold,
+            "supported_classes": self.class_names
+        }
