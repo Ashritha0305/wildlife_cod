@@ -103,8 +103,9 @@ class DepthEstimator:
             return self._fallback_depth(frame)
 
         import torch
+        from PIL import Image
 
-        rgb_frame = frame[:, :, ::-1]
+        rgb_frame = Image.fromarray(frame[:, :, ::-1].copy())
         inputs = self._processor(images=rgb_frame, return_tensors="pt")
         inputs = {name: value.to(self._model.device) for name, value in inputs.items()}
         with torch.no_grad():
