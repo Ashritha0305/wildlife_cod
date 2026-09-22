@@ -1,15 +1,60 @@
-deep-sort-realtime==1.3.2
-filelock==3.32.3
-fsspec==2026.7.0
-Jinja2==3.1.6
-MarkupSafe==3.0.3
-mpmath==1.3.0
-networkx==3.6.1
-numpy==2.4.6
-opencv-python==5.0.0.93
-pillow==12.3.0
-scipy==1.17.1
-sympy==1.14.0
-torch==2.13.0
-torchvision==0.28.0
-typing_extensions==4.16.0
+# ============================================================
+# wildlife-COD — requirements.txt
+# ============================================================
+#
+# IMPORTANT — PyTorch Installation:
+# ----------------------------------
+# PyTorch must be installed SEPARATELY before installing this file
+# because the correct package index depends on your CUDA version.
+#
+# For CUDA 12.1 (most current NVIDIA GPUs):
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# For CUDA 11.8:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+#
+# For CPU-only (no GPU):
+#   pip install torch torchvision torchaudio
+#
+# After installing PyTorch, install the rest:
+#   pip install -r requirements.txt
+# ============================================================
+
+# Core deep learning
+# torch        — installed separately (see instructions above)
+# torchvision  — installed separately (see instructions above)
+
+# Computer vision
+opencv-python>=4.7.0
+
+# Numerical computing
+numpy>=1.24.0
+
+# Image I/O and processing
+Pillow>=9.4.0
+
+# Visualisation
+matplotlib>=3.7.0
+
+# Progress bars (training loops)
+tqdm>=4.65.0
+
+# Evaluation metrics (precision, recall, etc.)
+scikit-learn>=1.2.0
+
+# TensorBoard — optional, for training curve visualisation
+tensorboard>=2.13.0
+
+# Utilities
+PyYAML>=6.0       # YAML config support if needed later
+colorama>=0.4.6   # Coloured terminal output (verify_environment.py)
+
+# Object Detection & Tracking
+ultralytics>=8.0.0
+deep-sort-realtime>=1.3.0
+
+# Depth Estimation
+timm>=1.0.0
+
+# Web Application UI
+Flask>=3.0.0
