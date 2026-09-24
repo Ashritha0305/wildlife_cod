@@ -109,10 +109,16 @@ class DepthEstimator:
         inputs = self._processor(images=rgb_frame, return_tensors="pt")
         inputs = {name: value.to(self._model.device) for name, value in inputs.items()}
         with torch.no_grad():
-            predicted_depth = self._model(**inputs).predicted_depth
-        depth = predicted_depth.squeeze().detach().cpu().numpy().astype(np.float32)
-        if depth.shape != (height, width):
-            depth = self._resize_nearest(depth, height, width)
+            outputs = self._model(**inputs)
+
+        results = self._processor.post_process_depth_estimation(
+        outputs,
+        source_sizes=[(rgb_frame.height, rgb_frame.width)],
+        )
+
+        depth = results[0]["predicted_depth"]
+        depth = depth.detach().cpu().numpy().astype(np.float32)
+
         return depth
 
     def __call__(self, frame: np.ndarray) -> np.ndarray:
